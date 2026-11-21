@@ -11,7 +11,8 @@ from app.schemas.llm_provider import ProviderCreate, ProviderUpdate
 from app.schemas.model_manage import ModelManageCreate, ModelManageUpdate, ModelManageQuery
 from app.services import llm_provider_service, model_manage_service, usage_manage_service
 from app.utils.response import ResponseFactory
-from app.utils.admin_auth import require_admin_user
+from app.utils.admin_auth import require_admin_user, require_permission
+from app.utils.rbac import AdminIdentity, Perm, has_permission
 from app.api.v1.controller.call_manage_controller import (
     _fetch_models_from_upstream,
     _validate_url,
@@ -50,7 +51,7 @@ def _fuzzy_match(query: str, target: str) -> float:
     return SequenceMatcher(None, query.lower(), target.lower()).ratio()
 
 
-@router.get("/company-search")
+@router.get("/company-search", dependencies=[Depends(require_permission(Perm.MODELS_READ))])
 async def search_company(name: str = ""):
     """
     根据厂家名称模糊搜索，返回匹配的厂家信息（URL 等）
@@ -79,7 +80,7 @@ async def search_company(name: str = ""):
     return ResponseFactory.ok(data={"matches": matches}, message="查询成功")
 
 
-@router.post("/fetch-models")
+@router.post("/fetch-models", dependencies=[Depends(require_permission(Perm.MODELS_WRITE))])
 async def fetch_models(body: FetchModelsRequest):
     """
     从运营商 API 拉取可用模型列表
@@ -103,12 +104,18 @@ async def fetch_models(body: FetchModelsRequest):
 # 注意：/providers 系列必须定义在 /{model_id} 之前，否则会被当作模型 ID 匹配
 
 
-def _provider_row(provider, model_count: int) -> dict:
+def _reveal_secret(identity: AdminIdentity) -> bool:
+    """当前角色是否允许查看上游 API Key"""
+    return has_permission(identity.role, Perm.SECRETS_READ)
+
+
+def _provider_row(provider, model_count: int, reveal_secret: bool) -> dict:
     return {
         "providerId": provider.provider_id,
         "providerName": provider.provider_name,
         "apiUrl": provider.api_url,
-        "apiKey": provider.api_key,
+        "apiKey": provider.api_key if reveal_secret else "",
+        "apiKeySet": bool(provider.api_key),
         "modelCount": model_count,
         "remarks": provider.remarks,
         "createdAt": provider.created_at.isoformat() if provider.created_at else None,
@@ -116,37 +123,72 @@ def _provider_row(provider, model_count: int) -> dict:
     }
 
 
-@router.get("/providers")
-async def list_providers(keyword: str = "", db: AsyncSession = Depends(get_db)):
+def _model_payload(model, reveal_secret: bool) -> dict:
+    """模型字典序列化，未授权角色不返回上游密钥"""
+    data = {
+        column.name: getattr(model, column.name)
+        for column in model.__table__.columns
+    }
+    data["api_key_set"] = bool(data.get("api_key"))
+    if not reveal_secret:
+        data["api_key"] = ""
+    return data
+
+
+@router.get("/providers", dependencies=[Depends(require_permission(Perm.PROVIDERS_READ))])
+async def list_providers(
+        keyword: str = "",
+        db: AsyncSession = Depends(get_db),
+        identity: AdminIdentity = Depends(require_admin_user),
+):
     """提供商列表（含关联模型数量）"""
     providers = await llm_provider_service.list_providers(db, keyword)
     counts = await llm_provider_service.get_model_counts(db)
-    data = [_provider_row(p, counts.get(p.provider_id, 0)) for p in providers]
+    reveal = _reveal_secret(identity)
+    data = [_provider_row(p, counts.get(p.provider_id, 0), reveal) for p in providers]
     return ResponseFactory.ok(data={"list": data, "total": len(data)}, message="查询成功")
 
 
-@router.get("/providers/{provider_id}")
-async def get_provider(provider_id: str, db: AsyncSession = Depends(get_db)):
+@router.get("/providers/{provider_id}", dependencies=[Depends(require_permission(Perm.PROVIDERS_READ))])
+async def get_provider(
+        provider_id: str,
+        db: AsyncSession = Depends(get_db),
+        identity: AdminIdentity = Depends(require_admin_user),
+):
     """提供商详情"""
     provider = await llm_provider_service.get_provider_by_id(db, provider_id)
     if provider is None:
         return ResponseFactory.not_found(message="提供商不存在")
     counts = await llm_provider_service.get_model_counts(db)
-    return ResponseFactory.ok(data=_provider_row(provider, counts.get(provider_id, 0)), message="查询成功")
+    return ResponseFactory.ok(
+        data=_provider_row(provider, counts.get(provider_id, 0), _reveal_secret(identity)),
+        message="查询成功",
+    )
 
 
-@router.post("/providers")
-async def create_provider(data: ProviderCreate, db: AsyncSession = Depends(get_db)):
+@router.post("/providers", dependencies=[Depends(require_permission(Perm.PROVIDERS_WRITE))])
+async def create_provider(
+        data: ProviderCreate,
+        db: AsyncSession = Depends(get_db),
+        identity: AdminIdentity = Depends(require_admin_user),
+):
     """新增提供商"""
     try:
         provider = await llm_provider_service.create_provider(db, data)
     except ValueError as e:
         return ResponseFactory.bad_request(message=str(e))
-    return ResponseFactory.created(data=_provider_row(provider, 0), message="新增成功")
+    return ResponseFactory.created(
+        data=_provider_row(provider, 0, _reveal_secret(identity)), message="新增成功",
+    )
 
 
-@router.put("/providers/{provider_id}")
-async def update_provider(provider_id: str, data: ProviderUpdate, db: AsyncSession = Depends(get_db)):
+@router.put("/providers/{provider_id}", dependencies=[Depends(require_permission(Perm.PROVIDERS_WRITE))])
+async def update_provider(
+        provider_id: str,
+        data: ProviderUpdate,
+        db: AsyncSession = Depends(get_db),
+        identity: AdminIdentity = Depends(require_admin_user),
+):
     """更新提供商（名称/地址/密钥级联同步到关联模型）"""
     try:
         provider = await llm_provider_service.update_provider(db, provider_id, data)
@@ -156,11 +198,12 @@ async def update_provider(provider_id: str, data: ProviderUpdate, db: AsyncSessi
         return ResponseFactory.not_found(message="提供商不存在")
     counts = await llm_provider_service.get_model_counts(db)
     return ResponseFactory.ok(
-        data=_provider_row(provider, counts.get(provider_id, 0)), message="更新成功",
+        data=_provider_row(provider, counts.get(provider_id, 0), _reveal_secret(identity)),
+        message="更新成功",
     )
 
 
-@router.delete("/providers/{provider_id}")
+@router.delete("/providers/{provider_id}", dependencies=[Depends(require_permission(Perm.PROVIDERS_DELETE))])
 async def delete_provider(provider_id: str, db: AsyncSession = Depends(get_db)):
     """删除提供商（仍有关联模型时拒绝）"""
     deleted, reason = await llm_provider_service.delete_provider(db, provider_id)
@@ -173,14 +216,14 @@ async def delete_provider(provider_id: str, db: AsyncSession = Depends(get_db)):
 # 同样必须定义在 /{model_id} 之前
 
 
-@router.get("/usage/overview")
+@router.get("/usage/overview", dependencies=[Depends(require_permission(Perm.USAGE_READ))])
 async def usage_overview(days: int = 7, db: AsyncSession = Depends(get_db)):
     """用量总览：汇总 + 每日趋势 + 按模型分布"""
     data = await usage_manage_service.get_usage_overview(db, days)
     return ResponseFactory.ok(data=data, message="查询成功")
 
 
-@router.get("/calls")
+@router.get("/calls", dependencies=[Depends(require_permission(Perm.CALLS_READ))])
 async def list_call_records(
         page: int = 1,
         page_size: int = 20,
@@ -204,41 +247,58 @@ async def list_call_records(
 # ==================== 模型 CRUD ====================
 
 
-@router.get("/list")
+@router.get("/list", dependencies=[Depends(require_permission(Perm.MODELS_READ))])
 async def list_models(
         query: ModelManageQuery = Depends(),
         db: AsyncSession = Depends(get_db),
+        identity: AdminIdentity = Depends(require_admin_user),
 ):
     """获取模型列表（支持多条件筛选）"""
     models = await model_manage_service.get_model_list(db, query)
     total = await model_manage_service.get_model_count(db)
+    reveal = _reveal_secret(identity)
     return ResponseFactory.ok(
-        data={"list": models, "total": total},
+        data={"list": [_model_payload(m, reveal) for m in models], "total": total},
         message="查询成功",
     )
 
 
-@router.get("/{model_id}")
-async def get_model(model_id: str, db: AsyncSession = Depends(get_db)):
+@router.get("/{model_id}", dependencies=[Depends(require_permission(Perm.MODELS_READ))])
+async def get_model(
+        model_id: str,
+        db: AsyncSession = Depends(get_db),
+        identity: AdminIdentity = Depends(require_admin_user),
+):
     """根据 ID 获取模型详情"""
     model = await model_manage_service.get_model_by_id(db, model_id)
     if not model:
         return ResponseFactory.not_found(message="模型不存在")
-    return ResponseFactory.ok(data=model, message="查询成功")
+    return ResponseFactory.ok(data=_model_payload(model, _reveal_secret(identity)), message="查询成功")
 
 
-@router.post("/")
-async def create_model(data: ModelManageCreate, db: AsyncSession = Depends(get_db)):
+@router.post("/", dependencies=[Depends(require_permission(Perm.MODELS_WRITE))])
+async def create_model(
+        data: ModelManageCreate,
+        db: AsyncSession = Depends(get_db),
+        identity: AdminIdentity = Depends(require_admin_user),
+):
     """新增模型（通过 provider_id 关联提供商并回填地址/密钥）"""
     try:
         model = await model_manage_service.create_model(db, data)
     except ValueError as e:
         return ResponseFactory.bad_request(message=str(e))
-    return ResponseFactory.created(data=model, message="新增成功")
+    return ResponseFactory.created(
+        data=_model_payload(model, _reveal_secret(identity)), message="新增成功",
+    )
 
 
-@router.put("/{model_id}")
-async def update_model(model_id: str, data: ModelManageUpdate, db: AsyncSession = Depends(get_db)):
+@router.put("/{model_id}", dependencies=[Depends(require_permission(Perm.MODELS_WRITE))])
+async def update_model(
+        model_id: str,
+        data: ModelManageUpdate,
+        db: AsyncSession = Depends(get_db),
+        identity: AdminIdentity = Depends(require_admin_user),
+):
     """更新模型（部分更新）—— 服务层为单一真实来源，不存在则返回 404"""
     try:
         model = await model_manage_service.update_model(db, model_id, data)
@@ -246,10 +306,12 @@ async def update_model(model_id: str, data: ModelManageUpdate, db: AsyncSession 
         return ResponseFactory.bad_request(message=str(e))
     if not model:
         return ResponseFactory.not_found(message="模型不存在")
-    return ResponseFactory.ok(data=model, message="更新成功")
+    return ResponseFactory.ok(
+        data=_model_payload(model, _reveal_secret(identity)), message="更新成功",
+    )
 
 
-@router.delete("/{model_id}")
+@router.delete("/{model_id}", dependencies=[Depends(require_permission(Perm.MODELS_DELETE))])
 async def delete_model(model_id: str, db: AsyncSession = Depends(get_db)):
     """删除模型"""
     deleted = await model_manage_service.delete_model(db, model_id)

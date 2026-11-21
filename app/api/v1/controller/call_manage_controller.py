@@ -27,7 +27,9 @@ from app.services import (
     project_manage_service,
     user_quota_service,
 )
+from app.utils.admin_auth import require_permission
 from app.utils.gateway_error import gateway_error_response
+from app.utils.rbac import Perm
 from app.utils.response import ResponseFactory
 from propmt import (
     ai_sec_propmt,
@@ -869,6 +871,8 @@ async def _fetch_models_from_upstream(com_url: str, api_key: str) -> tuple[list[
         (模型 ID 列表, 错误消息). 成功时错误消息为空字符串.
     """
     base_url = com_url.rstrip("/")
+    # 所有调用方（含公开的 /v1/models 别名）都先做 SSRF 校验
+    _validate_url(f"{base_url}/models")
     models: list[str] = []
     candidates = [
         f"{base_url}/v1/models",
@@ -1576,9 +1580,9 @@ async def list_models_openai(
     )
 
 
-@router.post("/models")
+@router.post("/models", dependencies=[Depends(require_permission(Perm.MODELS_WRITE))])
 async def fetch_models(body: FetchModelsBody):
-    """从运营商 API 拉取可用模型列表.
+    """从运营商 API 拉取可用模型列表（管理端功能，需要 models:write）.
 
     请求体: { com_url, api_key }
     """

@@ -10,7 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config.database import get_db
 from app.schemas.project_manage import ProjectCreate, ProjectUpdate, TokenCreate, TokenRotate
 from app.services import project_manage_service, usage_manage_service
-from app.utils.admin_auth import require_admin_user
+from app.utils.admin_auth import require_admin_user, require_permission
+from app.utils.rbac import Perm
 from app.utils.response import ResponseFactory
 
 logger = logging.getLogger(__name__)
@@ -21,14 +22,14 @@ router = APIRouter(dependencies=[Depends(require_admin_user)])
 # ==================== 项目 ====================
 
 
-@router.get("/projects")
+@router.get("/projects", dependencies=[Depends(require_permission(Perm.PROJECTS_READ))])
 async def list_projects(keyword: str = "", db: AsyncSession = Depends(get_db)):
     """项目列表（含今日/本月用量与有效 Token 数）"""
     data = await project_manage_service.list_projects(db, keyword)
     return ResponseFactory.ok(data={"list": data, "total": len(data)}, message="查询成功")
 
 
-@router.post("/projects")
+@router.post("/projects", dependencies=[Depends(require_permission(Perm.PROJECTS_WRITE))])
 async def create_project(data: ProjectCreate, db: AsyncSession = Depends(get_db)):
     """新建项目"""
     try:
@@ -40,7 +41,7 @@ async def create_project(data: ProjectCreate, db: AsyncSession = Depends(get_db)
     )
 
 
-@router.get("/projects/{project_id}")
+@router.get("/projects/{project_id}", dependencies=[Depends(require_permission(Perm.PROJECTS_READ))])
 async def get_project(project_id: str, db: AsyncSession = Depends(get_db)):
     """项目详情 + Token 列表"""
     project = await project_manage_service.get_project(db, project_id)
@@ -53,7 +54,7 @@ async def get_project(project_id: str, db: AsyncSession = Depends(get_db)):
     )
 
 
-@router.put("/projects/{project_id}")
+@router.put("/projects/{project_id}", dependencies=[Depends(require_permission(Perm.PROJECTS_WRITE))])
 async def update_project(
         project_id: str,
         data: ProjectUpdate,
@@ -74,7 +75,7 @@ async def update_project(
 # ==================== Token ====================
 
 
-@router.get("/projects/{project_id}/tokens")
+@router.get("/projects/{project_id}/tokens", dependencies=[Depends(require_permission(Perm.PROJECTS_READ))])
 async def list_tokens(project_id: str, db: AsyncSession = Depends(get_db)):
     """项目 Token 列表（不包含明文与哈希）"""
     project = await project_manage_service.get_project(db, project_id)
@@ -84,7 +85,7 @@ async def list_tokens(project_id: str, db: AsyncSession = Depends(get_db)):
     return ResponseFactory.ok(data={"list": tokens, "total": len(tokens)}, message="查询成功")
 
 
-@router.post("/projects/{project_id}/tokens")
+@router.post("/projects/{project_id}/tokens", dependencies=[Depends(require_permission(Perm.TOKENS_WRITE))])
 async def create_token(
         project_id: str,
         data: TokenCreate,
@@ -100,7 +101,7 @@ async def create_token(
     return ResponseFactory.created(data=payload, message="创建成功，密钥只显示一次")
 
 
-@router.post("/tokens/{token_id}/revoke")
+@router.post("/tokens/{token_id}/revoke", dependencies=[Depends(require_permission(Perm.TOKENS_WRITE))])
 async def revoke_token(token_id: str, db: AsyncSession = Depends(get_db)):
     """吊销 Token"""
     token = await project_manage_service.revoke_token(db, token_id)
@@ -111,7 +112,7 @@ async def revoke_token(token_id: str, db: AsyncSession = Depends(get_db)):
     )
 
 
-@router.post("/tokens/{token_id}/rotate")
+@router.post("/tokens/{token_id}/rotate", dependencies=[Depends(require_permission(Perm.TOKENS_WRITE))])
 async def rotate_token(
         token_id: str,
         data: TokenRotate | None = None,
@@ -133,7 +134,7 @@ async def rotate_token(
 # ==================== 项目用量 ====================
 
 
-@router.get("/projects/{project_id}/usage")
+@router.get("/projects/{project_id}/usage", dependencies=[Depends(require_permission(Perm.PROJECTS_READ))])
 async def project_usage(
         project_id: str,
         days: int = 30,
@@ -146,7 +147,7 @@ async def project_usage(
     return ResponseFactory.ok(data=data, message="查询成功")
 
 
-@router.get("/projects/{project_id}/records")
+@router.get("/projects/{project_id}/records", dependencies=[Depends(require_permission(Perm.PROJECTS_READ))])
 async def project_records(
         project_id: str,
         page: int = 1,
@@ -163,7 +164,7 @@ async def project_records(
     return ResponseFactory.ok(data={"list": records, "total": total}, message="查询成功")
 
 
-@router.get("/projects/{project_id}/records.csv")
+@router.get("/projects/{project_id}/records.csv", dependencies=[Depends(require_permission(Perm.PROJECTS_READ))])
 async def export_project_records(
         project_id: str,
         start_date: str = "",

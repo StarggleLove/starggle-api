@@ -17,7 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config.database import get_db
 from app.services import user_manage_service, user_quota_service
 from app.utils.response import ResponseFactory
-from app.utils.admin_auth import require_admin_user
+from app.utils.admin_auth import require_admin_user, require_permission
+from app.utils.rbac import Perm
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +93,7 @@ def _user_row(user, usage, policy) -> dict:
     }
 
 
-@router.get("/list")
+@router.get("/list", dependencies=[Depends(require_permission(Perm.USERS_READ))])
 async def list_users(
     page: int = 1,
     page_size: int = 20,
@@ -115,7 +116,7 @@ async def list_users(
     return ResponseFactory.ok(data={"list": data, "total": total}, message="查询成功")
 
 
-@router.post("/recharge-points")
+@router.post("/recharge-points", dependencies=[Depends(require_permission(Perm.USERS_WRITE))])
 async def recharge_points(
     body: RechargePointsBody,
     db: AsyncSession = Depends(get_db),
@@ -139,7 +140,7 @@ async def recharge_points(
     }, message="充值成功" if body.points > 0 else "扣减成功")
 
 
-@router.post("/reset-call-count")
+@router.post("/reset-call-count", dependencies=[Depends(require_permission(Perm.USERS_WRITE))])
 async def reset_call_count(
     body: ResetCallCountBody,
     db: AsyncSession = Depends(get_db),
@@ -161,7 +162,7 @@ async def reset_call_count(
     }, message="已重置今日调用次数")
 
 
-@router.get("/{user_id}/quota")
+@router.get("/{user_id}/quota", dependencies=[Depends(require_permission(Perm.USERS_READ))])
 async def get_user_quota(
     user_id: str = Path(..., min_length=1, max_length=64),
     db: AsyncSession = Depends(get_db),
@@ -176,7 +177,7 @@ async def get_user_quota(
     )
 
 
-@router.put("/{user_id}/quota")
+@router.put("/{user_id}/quota", dependencies=[Depends(require_permission(Perm.USERS_WRITE))])
 async def save_user_quota(
     body: QuotaPolicyBody,
     user_id: str = Path(..., min_length=1, max_length=64),
@@ -203,7 +204,7 @@ async def save_user_quota(
     )
 
 
-@router.get("/orders")
+@router.get("/orders", dependencies=[Depends(require_permission(Perm.USERS_READ))])
 async def list_orders(
     user_id: str = "",
     status: str = "",

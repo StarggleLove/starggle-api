@@ -28,7 +28,8 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-打开 <http://localhost:9010/>，使用 `.env` 中的管理员账号登录。
+打开 <http://localhost:9010/>，使用 Starggle 账号（共享 `user_info` 表的邮箱 + 密码）登录；
+账号的 `user_id` 必须在 `ADMIN_USER_IDS` 白名单内，否则无法登录管理台。
 
 ## 本地运行
 
@@ -49,14 +50,28 @@ uvicorn main:app --host 0.0.0.0 --port 9010
 | 环境变量 | 说明 | 默认 |
 |---|---|---|
 | `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_USER` / `MYSQL_PASSWORD` / `MYSQL_DATABASE` | MySQL 连接 | localhost / 3306 / root / 空 / `llm_gateway` |
-| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | 管理台登录账号 | `admin` / `admin` |
-| `JWT_SECRET_KEY` | JWT 签名密钥，生产必须修改 | `dev-only-change-me` |
+| `JWT_SECRET_KEY` | JWT 签名密钥，需与 StarggleCom 一致 | 开发默认值，生产必须注入 |
 | `ADMIN_USER_IDS` | 管理端 user_id 白名单，逗号分隔；为空时管理接口 fail-closed | 空 |
+| `ADMIN_ROLES` | 角色配置 JSON，如 `{"u_1001":"operator","ops@example.com":"viewer"}`；白名单内未配置的账号默认 `admin` | 空 |
 | 钻石计费 | 按 `X-Generation-Id` 聚合一次生成的实际成本，×3 后按 1 美元 = 50 钻石扣除；无开关 | 常开 |
 | `GATEWAY_TOKEN_REQUIRED` | `1` 时所有调用必须带 `sk-gw-` 项目 Token | `0` |
 | `PORT` | 服务端口 | `9010` |
 | `GATEWAY_DEBUG` | `1` 时输出请求体调试日志 | `0` |
 | `CORS_ORIGINS` | 跨域管理台来源，逗号分隔 | 空（同源即可） |
+
+### 管理角色
+
+`ADMIN_USER_IDS` 决定谁能进入管理台，`ADMIN_ROLES` 细化每个账号的角色（修改后需重启）：
+
+| 角色 | 权限 |
+|---|---|
+| `admin` | 全部权限，含删除提供商、查看上游 API Key、用户充值/配额 |
+| `operator` | 增改模型/提供商/项目/渠道与路由，可查看上游 Key；不可删除提供商、不可操作用户资金 |
+| `developer` | 只读 + 项目 Token 的创建/轮换/吊销 |
+| `viewer` | 只读；上游 API Key 一律返回空值 + `apiKeySet` 标记 |
+
+登录接口为 `POST /api/v1/auth/login`（邮箱 + 密码），`GET /api/v1/auth/me` 返回当前角色与权限。
+角色在每次请求时按环境变量重新解析，调整 `ADMIN_ROLES` 后重启即可生效，无需重新登录。
 
 ## 调用
 
