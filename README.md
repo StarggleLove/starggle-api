@@ -24,8 +24,9 @@ and failure isolation.
 
 - **Good fit**: one or a few operators, internal traffic, on-prem/private deployments,
   OpenAI-compatible clients, SQLite on a single host, or MySQL when you need multiple instances
-- **Not a fit**: public multi-tenant API resale, per-user recharge/billing, RBAC across
-  departments, or agent chat-log analytics. Use new-api, one-api, or LiteLLM for those.
+- **Not a fit**: public multi-tenant API resale, per-user recharge/billing, org-wide RBAC with
+  department hierarchies and SSO, or agent chat-log analytics. Use new-api, one-api, or LiteLLM
+  for those.
 
 Typical use cases:
 
@@ -56,7 +57,7 @@ and business-level fallbacks.
 - **Built-in chat UI**: `/chat` serves an offline Chatbox-style client with local conversation history, streaming, stop, regenerate, and JSON import/export
 - **Payload log switch**: full LLM request/response logs are on by default and can be turned off under "Channel Health"; logs may contain user prompts
 - **Bilingual UI**: English by default, with a one-click switch to Chinese in the bottom-right corner
-- **Single-admin mode**: credentials from environment variables, JWT login, no extra user system required
+- **Role-based admin accounts**: four built-in roles (`admin` / `operator` / `developer` / `viewer`) defined in environment variables, JWT login, no extra user system required
 - **Zero-config storage**: SQLite by default, no Redis or message queue required; switch to MySQL for multi-instance deployments
 
 ## How it compares
@@ -69,7 +70,7 @@ per-project quotas, without a multi-tenant user system.
 |---|---|---|---|---|
 | License | Apache-2.0 | MIT | AGPL-3.0 | MIT |
 | Stack | Python / FastAPI | Python | Go / React | Go |
-| Admin model | one admin from env vars | multi-user, teams, virtual keys | multi-user, groups, OAuth | multi-user, groups |
+| Admin model | env-defined accounts with four roles | multi-user, teams, virtual keys | multi-user, groups, OAuth | multi-user, groups |
 | Providers | preset list; any OpenAI-compatible endpoint can be added | 100+ integrations | 40+ providers | many OpenAI-compatible providers |
 | Routing | nine clusters (`async1..async9`); round-robin, cost-first, latency-first | weighted, least-busy, latency, usage, cost, fallback chains | channel groups with priority and weight | channel groups, priority, load balancing |
 | Channel health | success rate, latency, circuit breaker, half-open probe | retries, cooldowns, fallbacks | channel test, auto-disable | channel test, auto-disable |
@@ -79,7 +80,7 @@ per-project quotas, without a multi-tenant user system.
 ### Limitations
 
 - No virtual-model layer: a model maps to real provider rows, with no prompt/model composition
-- Single admin from environment variables; no RBAC or per-user accounts
+- Admin accounts and the four roles are defined in env vars (`ADMIN_USERS`); no sign-up, OAuth/SSO, department hierarchies, or per-end-user accounts
 - Routing is round-robin, cost-first, or latency-first per cluster; no weights, priority tiers, or quality-based model selection
 - No built-in alerting or Prometheus export; use the health dashboard and your log pipeline
 - No guardrails or content-policy layer
