@@ -49,8 +49,91 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# 完整请求体/响应正文可能包含用户提示词，默认不落日志
-DEBUG = os.getenv("GATEWAY_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
+# ── 完整报文日志 ──
+# 默认开启：把「客户端请求 / 发给上游的请求 / 上游返回的报文」完整打进日志，
+# 便于排查黑盒问题（报文可能含用户提示词，敏感环境请设 GATEWAY_LOG_BODY=0 关闭）。
+# GATEWAY_DEBUG 保留为兼容别名，任一开启即输出。
+# GATEWAY_LOG_BODY_MAX>0 时按字符截断单条报文，0 表示不截断。
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+LOG_BODY = _env_flag("GATEWAY_LOG_BODY", default=True) or _env_flag("GATEWAY_DEBUG")
+try:
+    LOG_BODY_MAX = max(0, int(os.getenv("GATEWAY_LOG_BODY_MAX", "0") or 0))
+except ValueError:
+    LOG_BODY_MAX = 0
+
+# 日志脱敏：这些请求头永远不打明文
+_SECRET_HEADER_NAMES = frozenset({
+    "authorization", "x-api-key", "api-key", "x-goog-api-key",
+    "cookie", "set-cookie", "proxy-authorization",
+})
+
+
+def _redact_headers(headers: Any) -> dict[str, str]:
+    """请求/响应头转日志副本：密钥类字段打码，避免凭证落盘."""
+    items = headers.items() if hasattr(headers, "items") else headers
+    return {
+        str(key): ("***" if str(key).lower() in _SECRET_HEADER_NAMES else str(value))
+        for key, value in items
+    }
+
+
+def _format_payload(payload: Any) -> str:
+    """报文转日志文本：JSON 美化输出，非 JSON 原样输出，超长按配置截断."""
+    if isinstance(payload, bytes):
+        payload = payload.decode("utf-8", errors="replace")
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+    if isinstance(payload, str):
+        text = payload
+    else:
+        try:
+            text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+        except (TypeError, ValueError):
+            text = repr(payload)
+    if LOG_BODY_MAX > 0 and len(text) > LOG_BODY_MAX:
+        omitted = len(text) - LOG_BODY_MAX
+        return f"{text[:LOG_BODY_MAX]}\n... [已截断 {omitted} 字符，GATEWAY_LOG_BODY_MAX={LOG_BODY_MAX}]"
+    return text
+
+
+# 流式日志断句：句号/问号/叹号/分号/省略号后换行，句末紧跟的右引号/右括号归入前一句
+_SENTENCE_BREAK_RE = re.compile(r"(?<=[。！？!?；;…])[”’」』）)】\]]*")
+
+
+def _format_sentences(text: str) -> str:
+    """流式正文转日志文本：按自然段与句末标点换行，避免整段挤在一行."""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines: list[str] = []
+    for block in normalized.split("\n"):
+        for part in _SENTENCE_BREAK_RE.split(block):
+            part = part.strip()
+            if part:
+                lines.append(part)
+    return "\n".join(lines)
+
+
+def _log_upstream_request(request_id: str, plan: dict) -> None:
+    """记录真正发给上游的完整请求报文.
+
+    必须在 _replace_core_prompts 之后调用，日志里才是占位符展开后的真实报文.
+    """
+    if not LOG_BODY:
+        return
+    logger.info(
+        "[%s] → 发给上游的完整请求报文 POST %s\nheaders=%s\n%s",
+        request_id or "-", plan["forward_url"],
+        _redact_headers(plan["fwd_headers"]),
+        _format_payload(plan["body"]),
+    )
 
 # ── 模型名称校验 ──
 _MODEL_NAME_RE = re.compile(r"^[a-zA-Z0-9_\-./@:]+$")
@@ -339,8 +422,13 @@ def _prepare_forward_plan(
         )
 
     # ── 思考模式开关判定 ──
+    # 优先级：模型显式配置(1/2) > X-Thinking 显式指定 > 集群默认。
+    # 集群默认：集群1(async1) 跟随请求；其他集群默认强制关闭思考，
+    # 避免异步链上的推理模型按厂商默认档（通常最贵最慢）空烧 token。
     think_enabled: Optional[bool] = None
     model_think_mode = selected.is_think or "0"
+    cluster = (selected.async_type or "").strip().lower()
+    cluster_default_off = model_think_mode == "0" and cluster not in ("", "async1")
     if model_think_mode == "1":
         think_enabled = True
     elif model_think_mode == "2":
@@ -350,6 +438,12 @@ def _prepare_forward_plan(
         logger.info(
             "POST /call-manage/chat/completions -> X-Thinking=%r enabled=%s model=%s",
             thinking_header, think_enabled, model_name,
+        )
+    elif cluster_default_off:
+        think_enabled = False
+        logger.info(
+            "POST /call-manage/chat/completions -> 集群 %s 默认强制关闭思考 enabled=False model=%s",
+            cluster, model_name,
         )
     if model_think_mode in ("1", "2"):
         logger.info(
@@ -448,12 +542,6 @@ def _prepare_forward_plan(
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
-
-    if DEBUG:
-        logger.info(
-            "POST /call-manage/chat/completions -> 发给上游的请求报文:\n%s",
-            json.dumps(body, ensure_ascii=False, indent=2),
-        )
 
     return {
         "body": body,
@@ -943,6 +1031,7 @@ async def chat_completions(
                    不影响集群选择。
         X-Thinking: 思考模式开关（"1"/"true" 开启，"0"/"false" 关闭）.
                     仅在模型「思考模式」为跟随请求时生效；模型配置为强制开/关时以模型为准.
+                    集群默认：集群1(async1) 跟随请求；其他集群未显式指定时默认强制关闭思考.
         X-Response-Format: "json_object" 时按实际模型注入 response_format.
         X-User-Id: 调用方标识，用于 token 用量与调用记录统计；缺省视为匿名.
         X-Feature-Code: 功能码（如 role_reply），仅用于用量分组统计；
@@ -955,6 +1044,21 @@ async def chat_completions(
     """
     t0 = time.perf_counter()
     request_id = getattr(request.state, "request_id", "") or uuid.uuid4().hex
+    if LOG_BODY:
+        # 提前读取并缓存请求体（Starlette 会缓存，后续 request.json() 仍可用），
+        # 保证鉴权失败、配额拦截等提前返回的分支也能看到客户端到底发了什么
+        try:
+            raw_request_body = await request.body()
+        except Exception as exc:  # 客户端断流等，不影响正常流程
+            raw_request_body = b""
+            logger.warning("[%s] 读取客户端请求体失败: %s", request_id, exc)
+        logger.info(
+            "[%s] ← 收到客户端请求 %s %s\nheaders=%s\n请求报文:\n%s",
+            request_id, request.method,
+            request.url.path + (f"?{request.url.query}" if request.url.query else ""),
+            _redact_headers(request.headers),
+            _format_payload(raw_request_body),
+        )
     purpose_header = x_purpose
     async_type_header = x_async_type
     response_format_header = x_response_format
@@ -1127,6 +1231,7 @@ async def chat_completions(
                 request_id=request_id,
             )
             plan["body"] = _replace_core_prompts(plan["body"])
+            _log_upstream_request(request_id, plan)
             model_name = plan["model_name"]
             if identity is not None and not project_manage_service.model_allowed(identity, model_name):
                 logger.warning(
@@ -1156,6 +1261,12 @@ async def chat_completions(
                     stream_resp.status_code, model_name, ttfb_ms,
                     attempt_index + 1, len(candidates),
                 )
+                if LOG_BODY:
+                    logger.info(
+                        "[%s] ← 上游流式返回 HTTP %d model=%s headers=%s",
+                        request_id, stream_resp.status_code, model_name,
+                        _redact_headers(stream_resp.headers),
+                    )
             except Exception as e:
                 elapsed = (time.perf_counter() - attempt_start) * 1000
                 err_desc = " ".join(f"{type(e).__name__}: {e}".split())
@@ -1271,15 +1382,12 @@ async def chat_completions(
                         _model_name, elapsed, total_bytes, len(content_text),
                         len(reasoning_text), usage_info,
                     )
-                    if DEBUG and content_text:
+                    if LOG_BODY and content_text:
+                        # 只打正文内容（不打印 SSE 原始 JSON），按句末标点换行，便于阅读
                         logger.info(
-                            "POST /call-manage/chat/completions <- STREAM 完整返回内容 model=%s:\n%s",
-                            _model_name, content_text,
-                        )
-                    if DEBUG and reasoning_text:
-                        logger.info(
-                            "POST /call-manage/chat/completions <- STREAM 思维链 model=%s:\n%s",
-                            _model_name, reasoning_text,
+                            "[%s] ← 上游流式返回内容 model=%s (%d 字):\n%s",
+                            request_id, _model_name, len(content_text),
+                            _format_sentences(content_text),
                         )
 
                     if user_id and upstream_ok:
@@ -1337,6 +1445,7 @@ async def chat_completions(
                     request_id=request_id,
                 )
                 plan["body"] = _replace_core_prompts(plan["body"])
+                _log_upstream_request(request_id, plan)
                 model_name = plan["model_name"]
                 if identity is not None and not project_manage_service.model_allowed(identity, model_name):
                     logger.warning(
@@ -1382,9 +1491,12 @@ async def chat_completions(
                     resp.status_code, model_name, elapsed, len(resp_text),
                     attempt_index + 1, len(candidates),
                 )
-                if DEBUG:
+                if LOG_BODY:
                     logger.info(
-                        "POST /call-manage/chat/completions <- 完整返回报文:\n%s", resp_text,
+                        "[%s] ← 上游完整返回报文 HTTP %d model=%s headers=%s\n%s",
+                        request_id, resp.status_code, model_name,
+                        _redact_headers(resp.headers),
+                        _format_payload(resp_text),
                     )
 
                 if resp.status_code >= 400:

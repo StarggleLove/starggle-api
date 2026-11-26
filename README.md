@@ -56,7 +56,9 @@ uvicorn main:app --host 0.0.0.0 --port 9010
 | 钻石计费 | 按 `X-Generation-Id` 聚合一次生成的实际成本，×3 后按 1 美元 = 50 钻石扣除；无开关 | 常开 |
 | `GATEWAY_TOKEN_REQUIRED` | `1` 时所有调用必须带 `sk-gw-` 项目 Token | `0` |
 | `PORT` | 服务端口 | `9010` |
-| `GATEWAY_DEBUG` | `1` 时输出请求体调试日志 | `0` |
+| `GATEWAY_LOG_BODY` | `0` 时关闭完整请求/返回报文日志（含提示词，敏感环境应关闭） | `1`（开启） |
+| `GATEWAY_LOG_BODY_MAX` | 单条报文日志最大字符数，`0` 不截断 | `0` |
+| `GATEWAY_DEBUG` | 兼容旧开关，效果等同 `GATEWAY_LOG_BODY=1` | 空 |
 | `CORS_ORIGINS` | 跨域管理台来源，逗号分隔 | 空（同源即可） |
 
 ### 管理角色

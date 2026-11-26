@@ -30,7 +30,10 @@ if not logger.handlers:
 for lib in ("httpx", "httpcore", "urllib3"):
     logging.getLogger(lib).setLevel(logging.WARNING)
 
-DEBUG = os.environ.get("GATEWAY_DEBUG", "").lower() in ("1", "true", "yes")
+# 与 call_manage_controller 同口径：完整报文日志默认开启，GATEWAY_LOG_BODY=0 关闭；
+# GATEWAY_DEBUG 保留为兼容别名
+LOG_BODY = os.environ.get("GATEWAY_LOG_BODY", "1").strip().lower() not in ("0", "false", "no", "off") \
+    or os.environ.get("GATEWAY_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 @asynccontextmanager
@@ -40,8 +43,8 @@ async def lifespan(_app: FastAPI):
     db_ok = await init_database()
     if not db_ok:
         logger.warning("数据库初始化未完全成功，部分功能可能不可用")
-    if DEBUG:
-        logger.info("DEBUG 模式已开启 — 请求体将完整打印到日志")
+    if LOG_BODY:
+        logger.info("完整报文日志已开启 — 请求/返回报文将完整打印（GATEWAY_LOG_BODY=0 可关闭）")
     yield
     # 关闭时：清理资源
     from app.config.database import engine
